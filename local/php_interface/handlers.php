@@ -1,10 +1,13 @@
 <?php
 
+use Bitrix\Iblock\PropertyTable;
+use Bitrix\Main\Loader;
+
 AddEventHandler("iblock", "OnIBlockPropertyBuildList", ["CustomProperty", "GetUserTypeDescription"]);
 
 class CustomProperty
 {
-    private static $arInputsValue = [];
+    private static array $arInputsValue = [];
 
     /**
      * @return array 'Массив, описывающий кастомное свойство'
@@ -16,7 +19,7 @@ class CustomProperty
             'USER_TYPE' => 'CUSTOM_PROPERTY',
             'CLASS_NAME' => __CLASS__,
             'DESCRIPTION' => 'Кастомное свойство файл+строка+HTML/text',
-            'PROPERTY_TYPE' => \Bitrix\Iblock\PropertyTable::TYPE_STRING,
+            'PROPERTY_TYPE' => PropertyTable::TYPE_STRING,
             'GetPropertyFieldHtml' => [__CLASS__, 'GetPropertyFieldHtml'], // Открытие карточки элемента инфоблока
             "GetSettingsHTML" => [__CLASS__, "GetSettingsHTML"], // Открытие настроек свойства в настройках инфоблока
 //            "PrepareSettings" => [__CLASS__, "PrepareSettings"], // Сохранение свойства в настройках инфоблока
@@ -25,37 +28,36 @@ class CustomProperty
         ];
     }
 
-    public static function GetPropertyFieldHtml($arProperty, $arValue, $arHtmlControl)
+    public static function GetPropertyFieldHtml($arProperty, $arValue, $arHtmlControl): string
     {
-        \CModule::IncludeModule("fileman");
+        Loader::includeModule('fileman');
 
-        self::setInputsValue($arValue['VALUE']);
-        $html = self::getInputsHtml($arHtmlControl);
-        return $html;
+        self::setInputsValue($arValue);
+        return self::getInputsHtml($arHtmlControl);
     }
 
-    private static function setInputsValue($value)
+    private static function setInputsValue($arValue): void
     {
         self::$arInputsValue = [
             'STRING' => '',
-            'FILE' => '',
+            'FILE_ID' => '',
             'TEXTAREA' => []
         ];
 
-        if (!is_array($value)) {
+        if (!is_array($arValue['VALUE'])) {
             return;
         }
 
-        if (!empty($value['STRING'])) {
-            self::$arInputsValue['STRING'] = $value['STRING'];
+        if (!empty($arValue['VALUE']['STRING'])) {
+            self::$arInputsValue['STRING'] = $arValue['VALUE']['STRING'];
         }
 
-        if (!empty($value['FILE'])) {
-            self::$arInputsValue['FILE'] = $value['FILE'];
+        if (!empty($arValue['VALUE']['FILE_ID'])) {
+            self::$arInputsValue['FILE_ID'] = $arValue['VALUE']['FILE_ID'];
         }
 
-        if (!empty($value['TEXTAREA'])) {
-            self::$arInputsValue['TEXTAREA'] = $value['TEXTAREA'];
+        if (!empty($arValue['VALUE']['TEXTAREA'])) {
+            self::$arInputsValue['TEXTAREA'] = $arValue['VALUE']['TEXTAREA'];
         }
     }
 
@@ -71,14 +73,20 @@ class CustomProperty
                 type="text"
                 value="' . self::$arInputsValue['STRING'] . '">';
 
-        $html .= '<br><p>Файл:</p>';
+        $html .= '<input
+                name="' . $inputBaseName . '[SAVED_FILE_ID]"
+                type="hidden"
+                value="' . self::$arInputsValue['FILE_ID'] . '">';
+
+        $html .= '<br><p class="custom-file">Файл:</p>';
 
         $fileInput = CFile::InputFile(
             $inputBaseName . '[FILE]',
             20,
-            self::$arInputsValue['FILE'],
+            self::$arInputsValue['FILE_ID'],
             strFileType: '',
-            bShowFilePath: false
+            field_checkbox: 'data-original-name="' . $arHtmlControl['VALUE'] . '[DELETE_FILE]"',
+            bShowFilePath: false,
         );
 
         $html .= $fileInput . '<br><br>';
@@ -89,7 +97,7 @@ class CustomProperty
         return $html;
     }
 
-    private static function getEditorHtml($arHtmlControl)
+    private static function getEditorHtml($arHtmlControl): string
     {
         ob_start();
         CFileMan::AddHTMLEditorFrame(
@@ -98,19 +106,21 @@ class CustomProperty
             $arHtmlControl['VALUE'] . '[TEXTAREA][TYPE]',
             self::$arInputsValue['TEXTAREA']['TYPE'] ?? '',
             array(
-                'height' => 450,
+                'height' => 100,
                 'width' => '100%'
             ),
-            textarea_field: 'data-original-name="' . $arHtmlControl['VALUE'] . '[TEXTAREA][TEXT]"'
+            textarea_field: 'data-original-name="' . $arHtmlControl['VALUE'] . '[TEXTAREA][TEXT]"',
         );
 
         ?>
         <script>
             window.addEventListener('load', function() {
-                let arTextareas = document.querySelectorAll('.typearea')
 
-                for (let textarea of arTextareas) {
-                    textarea.name = textarea.dataset.originalName;
+                // Исправляем name для textarea и input, удаляющий файл, т.к. их name изменяется в
+                // /bitrix/modules/fileman/fileman.php и /bitrix/modules/main/classes/general/file.php
+                let elements = document.querySelectorAll('[data-original-name]')
+                for (let element of elements) {
+                    element.name = element.dataset.originalName;
                 }
             });
         </script>
@@ -121,21 +131,31 @@ class CustomProperty
 
     public static function ConvertToDB($arProperty, $arValue)
     {
-        $value = $arValue['VALUE'];
-
         // НЕ сохранять пустые свойства (важно, если поле множественное)
         if (
-            empty($value['STRING']) &&
-            empty($value['FILE']['name']) &&
-            empty($value['TEXTAREA']['TEXT'])
+            empty($arValue['VALUE']['STRING']) &&
+            empty($arValue['VALUE']['FILE']['name']) &&
+            empty($arValue['VALUE']['TEXTAREA']['TEXT'])
         ) {
             return;
         }
 
-        if (!empty($value['FILE']['name'])) {
-            $fileId = CFile::SaveFile($value['FILE'], 'custom-property');
-            $arValue['VALUE']['FILE'] = $fileId;
+        // Удаляем файл, если отметили галочку
+        if (!empty($arValue['VALUE']['DELETE_FILE'])) {
+            if (!empty($arValue['VALUE']['SAVED_FILE_ID'])) {
+                CFile::Delete($arValue['VALUE']['SAVED_FILE_ID']);
+            }
+        } // сохраняем файл, если добавили
+        elseif (!empty($arValue['VALUE']['FILE']['name'])) {
+            $fileId = CFile::SaveFile($arValue['VALUE']['FILE'], 'custom-property');
+            $arValue['VALUE']['FILE_ID'] = $fileId;
+        } // если уже есть сохраненный файл, то получаемый ID сохраненного файла
+        elseif (!empty($arValue['VALUE']['SAVED_FILE_ID'])) {
+            $arValue['VALUE']['FILE_ID'] = $arValue['VALUE']['SAVED_FILE_ID'];
         }
+
+        unset($arValue['VALUE']['FILE']);
+        unset($arValue['VALUE']['SAVED_FILE_ID']);
 
         $arValue["VALUE"] = serialize($arValue["VALUE"]);
 
@@ -149,7 +169,7 @@ class CustomProperty
         return $arValue;
     }
 
-    public static function GetSettingsHTML($arProperty, $strHTMLControlName, &$arPropertyFields)
+    public static function GetSettingsHTML($arProperty, $strHTMLControlName, &$arPropertyFields): void
     {
         $arPropertyFields = array(
             "HIDE" => array('DEFAULT_VALUE'),
